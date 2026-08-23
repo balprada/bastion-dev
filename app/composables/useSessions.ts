@@ -13,12 +13,19 @@ export interface OrgInfo {
 // Module scope is safe because ssr:false keeps this per-browser.
 let initPromise: Promise<void> | null = null
 
+// Monotonic ticket for org loads. A response may only write state if its
+// ticket is still the latest — a slow response belonging to user A must
+// never overwrite the org of user B (sign-out/sign-in race).
+let orgRequestId = 0
+
 export function useSession() {
   const user = useState<User | null>('bastion:user', () => null)
   const org = useState<OrgInfo | null>('bastion:org', () => null)
   const ready = useState<boolean>('bastion:ready', () => false)
 
   async function loadOrg(): Promise<void> {
+    // Take a ticket before awaiting anything.
+    const requestId = ++orgRequestId
     const supabase = useSupabase()
 
     // RLS in action even here: this query can only ever return the caller's
@@ -28,6 +35,9 @@ export function useSession() {
       .from('members')
       .select('role, organizations(id, slug, name)')
       .limit(1)
+
+    // Superseded by a newer sign-in or a sign-out → discard silently.
+    if (requestId !== orgRequestId) return
 
     if (error) {
       console.error('[session] could not load org membership:', error.message)
@@ -70,6 +80,7 @@ export function useSession() {
               void loadOrg()
             }
             if (event === 'SIGNED_OUT') {
+              orgRequestId++ // invalidate any in-flight org load
               org.value = null
             }
             // TOKEN_REFRESHED / USER_UPDATED only refresh `user` above.
@@ -85,6 +96,7 @@ export function useSession() {
   }
 
   async function signOut(): Promise<void> {
+    orgRequestId++ // a sign-out invalidates in-flight org loads
     const supabase = useSupabase()
     const { error } = await supabase.auth.signOut()
     if (error) console.error('[session] sign-out failed:', error.message)

@@ -5,6 +5,7 @@ const props = defineProps<{ finding: Finding | null }>()
 const emit = defineEmits<{ close: [] }>()
 
 const closeBtn = ref<HTMLButtonElement | null>(null)
+const drawerEl = ref<HTMLElement | null>(null)
 let restoreFocus: HTMLElement | null = null
 
 const BANDS: Record<Severity, string> = {
@@ -15,7 +16,41 @@ const BANDS: Record<Severity, string> = {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape') emit('close')
+  if (e.key === 'Escape') {
+    emit('close')
+    return
+  }
+
+  // Tab trap: aria-modal="true" promises focus stays in the dialog.
+  // Tab wraps last→first, Shift+Tab wraps first→last; if focus ever
+  // escapes to the page behind the backdrop, it is pulled back in.
+  if (e.key !== 'Tab') return
+
+  const root = drawerEl.value
+  if (!root) return
+
+  const focusables = Array.from(
+    root.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((el) => !el.hasAttribute('disabled'))
+
+  if (focusables.length === 0) return
+
+  const first = focusables[0]
+  const last = focusables[focusables.length - 1]
+  const active = document.activeElement
+
+  if (e.shiftKey && (active === first || active === root)) {
+    e.preventDefault()
+    last.focus()
+  } else if (!e.shiftKey && active === last) {
+    e.preventDefault()
+    first.focus()
+  } else if (active !== root && !root.contains(active)) {
+    e.preventDefault()
+    first.focus()
+  }
 }
 
 // Open: lock scroll, remember focus, focus the close button.
@@ -55,6 +90,7 @@ onBeforeUnmount(() => {
     <Transition name="drawer">
       <aside
         v-if="finding"
+        ref="drawerEl"
         class="drawer"
         role="dialog"
         aria-modal="true"
