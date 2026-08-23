@@ -150,6 +150,10 @@ async function signIn(withEmail: string, withPassword: string) {
         Each account sees only its own organization's findings — enforced by
         Postgres row-level security, not by the UI.
       </p>
+
+      <div class="about-row">
+        <NuxtLink to="/about" class="about-link">About this build →</NuxtLink>
+      </div>
     </div>
   </div>
 </template>
@@ -267,4 +271,16 @@ async function signIn(withEmail: string, withPassword: string) {
   line-height: 1.65;
   text-align: center;
 }
+
+.about-row {
+  margin-top: 0.9rem;
+  text-align: center;
+}
+.about-link {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+.about-link:hover { color: var(--accent); }
 </style>
