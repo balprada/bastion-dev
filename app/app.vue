@@ -1,4 +1,6 @@
-<!-- app/app.vue — app shell. The layout wrapper arrives in Step 3. -->
+<!-- app/app.vue — root shell: layout wraps every page. -->
 <template>
-  <NuxtPage />
+  <NuxtLayout>
+    <NuxtPage />
+  </NuxtLayout>
 </template>
