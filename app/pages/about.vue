@@ -6,7 +6,7 @@ useHead({ title: 'About this build — Bastion' })
 interface ColumnDef {
   name: string
   type: string
-  key?: 'PK' | 'FK' | 'PK · FK' | 'unique'
+  key?: 'PK' | 'FK' | 'PK · FK' | 'unique' | 'unique (global)'
 }
 interface TableDef {
   name: string
@@ -21,21 +21,83 @@ const tables: TableDef[] = [
     tag: 'tenant root',
     columns: [
       { name: 'id', type: 'uuid', key: 'PK' },
-      { name: 'slug', type: 'text', key: 'unique' },
+      { name: 'slug', type: 'text', key: 'unique (global)' },
       { name: 'name', type: 'text' },
       { name: 'created_at', type: 'timestamptz' }
     ],
-    note: 'slug is the natural key the seed resolves orgs by'
+    note: 'slug globally unique — the org itself is the tenant'
   },
   {
     name: 'members',
-    tag: 'membership join',
+    tag: 'org membership',
     columns: [
       { name: 'org_id', type: 'uuid', key: 'PK · FK' },
       { name: 'user_id', type: 'uuid', key: 'PK · FK' },
       { name: 'role', type: 'text' }
     ],
-    note: 'pk (org_id, user_id) · role: viewer | admin'
+    note: 'every isolation policy resolves through this table'
+  },
+  {
+    name: 'departments',
+    tag: 'structure',
+    columns: [
+      { name: 'id', type: 'uuid', key: 'PK' },
+      { name: 'org_id', type: 'uuid', key: 'FK' },
+      { name: 'slug', type: 'text' },
+      { name: 'name', type: 'text' }
+    ],
+    note: 'unique (org_id, slug) — per-tenant namespace, like GitHub'
+  },
+  {
+    name: 'projects',
+    tag: 'structure',
+    columns: [
+      { name: 'id', type: 'uuid', key: 'PK' },
+      { name: 'org_id', type: 'uuid', key: 'FK' },
+      { name: 'department_id', type: 'uuid', key: 'FK' },
+      { name: 'slug', type: 'text' },
+      { name: 'name', type: 'text' }
+    ],
+    note: 'composite FK → parent must be in the same org'
+  },
+  {
+    name: 'teams',
+    tag: 'structure',
+    columns: [
+      { name: 'id', type: 'uuid', key: 'PK' },
+      { name: 'org_id', type: 'uuid', key: 'FK' },
+      { name: 'project_id', type: 'uuid', key: 'FK' },
+      { name: 'slug', type: 'text' },
+      { name: 'name', type: 'text' }
+    ],
+    note: 'project-scoped teams'
+  },
+  {
+    name: 'team_members',
+    tag: 'membership',
+    columns: [
+      { name: 'team_id', type: 'uuid', key: 'PK · FK' },
+      { name: 'user_id', type: 'uuid', key: 'PK · FK' },
+      { name: 'org_id', type: 'uuid', key: 'FK' },
+      { name: 'role', type: 'text' }
+    ],
+    note: 'org_id denormalized, backed by a composite FK'
+  },
+  {
+    name: 'root_causes',
+    tag: 'global catalog',
+    columns: [
+      { name: 'id', type: 'uuid', key: 'PK' },
+      { name: 'code', type: 'text', key: 'unique (global)' },
+      { name: 'title', type: 'text' },
+      { name: 'severity', type: 'severity' },
+      { name: 'first_discovered', type: 'date' },
+      { name: 'fix_available', type: 'boolean' },
+      { name: 'fix_method', type: 'fix_method' },
+      { name: 'fix_effort', type: 'fix_effort' },
+      { name: 'workaround', type: 'text' }
+    ],
+    note: 'NO org_id — reference data by design'
   },
   {
     name: 'findings',
@@ -43,16 +105,18 @@ const tables: TableDef[] = [
     columns: [
       { name: 'id', type: 'uuid', key: 'PK' },
       { name: 'org_id', type: 'uuid', key: 'FK' },
+      { name: 'department_id', type: 'uuid', key: 'FK' },
+      { name: 'project_id', type: 'uuid', key: 'FK' },
+      { name: 'team_id', type: 'uuid', key: 'FK' },
+      { name: 'root_cause_id', type: 'uuid', key: 'FK' },
       { name: 'title', type: 'text' },
       { name: 'severity', type: 'severity' },
-      { name: 'status', type: 'finding_status' },
       { name: 'cvss', type: 'numeric(3,1)' },
-      { name: 'description', type: 'text' },
       { name: 'asset', type: 'text' },
-      { name: 'detected_at', type: 'timestamptz' },
-      { name: 'created_at', type: 'timestamptz' }
+      { name: 'affected_component', type: 'text' },
+      { name: 'detected_at', type: 'timestamptz' }
     ],
-    note: 'check (cvss 0–10) · unique (org_id, title)'
+    note: 'composite FKs on all three scope refs · unique (org_id, title)'
   }
 ]
 
@@ -60,68 +124,65 @@ const stack = [
   'nuxt 4 · static SPA',
   'typescript',
   'supabase · postgres + auth',
-  'postgres row-level security',
-  'cloudflare pages',
+  'postgres RLS',
+  'one project · two schemas',
+  'cloudflare workers',
   'ibm plex sans / mono'
 ]
 
 // ---- SQL artifacts -----------------------------------------------------------
 
-// Verbatim from supabase/01_schema.sql — only the idempotent
-// `drop policy if exists` re-run guards are omitted for readability.
-const policySql = `-- Enable RLS. Without this line, policies are ignored entirely.
-alter table public.organizations enable row level security;
-alter table public.members      enable row level security;
-alter table public.findings     enable row level security;
+const policySql = `-- Enable RLS on every table (policies are ignored without this).
+alter table bastion_v2.findings     enable row level security;
+alter table bastion_v2.departments  enable row level security;
+-- … identical for members, projects, teams, team_members, organizations
 
--- organizations: members can see only the orgs they belong to.
-create policy orgs_select_own
-  on public.organizations
-  for select
-  to authenticated
-  using (
-    id in (
-      select m.org_id
-      from public.members m
-      where m.user_id = (select auth.uid())
-    )
-  );
-comment on policy orgs_select_own on public.organizations is
-  'SELECT: members can read only the organizations they belong to.';
-
--- members: users can see only their own membership rows.
-create policy members_select_own
-  on public.members
-  for select
-  to authenticated
-  using ( user_id = (select auth.uid()) );
-comment on policy members_select_own on public.members is
-  'SELECT: a user can read only their own membership rows.';
-
--- findings: the core tenant-isolation policy. Each statement resolves the
--- caller's org memberships once, then returns only matching rows.
-create policy findings_select_own_org
-  on public.findings
+-- Structure tables: the same flat org predicate everywhere.
+create policy departments_select_own
+  on bastion_v2.departments
   for select
   to authenticated
   using (
     org_id in (
       select m.org_id
-      from public.members m
+      from bastion_v2.members m
       where m.user_id = (select auth.uid())
     )
   );
-comment on policy findings_select_own_org on public.findings is
-  'SELECT: users can read only findings belonging to an org they are a member of. Tenant isolation boundary.';
+comment on policy departments_select_own on bastion_v2.departments is
+  'SELECT: org-level isolation — only departments of the caller''s organizations.';
 
--- This app is read-only: no INSERT/UPDATE/DELETE policies exist. Write
--- policies would follow the identical (select auth.uid()) pattern with
--- USING / WITH CHECK.`
+-- findings: the tenant isolation boundary (core deliverable).
+create policy findings_select_own_org
+  on bastion_v2.findings
+  for select
+  to authenticated
+  using (
+    org_id in (
+      select m.org_id
+      from bastion_v2.members m
+      where m.user_id = (select auth.uid())
+    )
+  );
+comment on policy findings_select_own_org on bastion_v2.findings is
+  'SELECT: the tenant isolation boundary — findings of the caller''s organizations only.';
+
+-- root_causes: intentionally permissive — see the classification note.
+create policy root_causes_select_all
+  on bastion_v2.root_causes
+  for select
+  to authenticated
+  using ( true );
+comment on policy root_causes_select_all on bastion_v2.root_causes is
+  'SELECT: global catalog — readable across tenants by design (no tenant data).'
+
+-- Full source: supabase/01_schema.sql (this page shows the pattern,
+-- not all eight policies — they differ only in table name).`
 
 const naiveSql = `using (
   org_id in (
     select m.org_id
-    from public.members m
+    from bastion_v2.members m
     where m.user_id = auth.uid()
   )
 )`
@@ -129,10 +190,41 @@ const naiveSql = `using (
 const shippedSql = `using (
   org_id in (
     select m.org_id
-    from public.members m
+    from bastion_v2.members m
     where m.user_id = (select auth.uid())
   )
 )`
+
+const fkSql = `-- Every hierarchical edge enforces tenant integrity on the WRITE side:
+foreign key (department_id, org_id)
+  references bastion_v2.departments (id, org_id) on delete cascade,
+foreign key (project_id, org_id)
+  references bastion_v2.projects (id, org_id) on delete cascade,
+foreign key (team_id, org_id)
+  references bastion_v2.teams (id, org_id) on delete cascade
+
+-- RLS decides who can SEE rows; these decide which rows can EXIST.
+-- A finding cannot reference another org's team even if every policy
+-- were dropped — the database rejects the write.`
+
+const teamPolicySql = `-- Documented, deliberately NOT applied. One statement away if a
+-- client requires need-to-know between teams (M&A walls, compartments).
+-- The org-admin override keeps the client's own security team org-wide:
+
+create policy findings_select_team_scoped
+  on bastion_v2.findings
+  for select
+  to authenticated
+  using (
+    org_id in (
+      select m.org_id from bastion_v2.members m
+      where m.user_id = (select auth.uid()) and m.role = 'admin'
+    )
+    or team_id in (
+      select tm.team_id from bastion_v2.team_members tm
+      where tm.user_id = (select auth.uid())
+    )
+  );`
 </script>
 
 <template>
@@ -140,15 +232,21 @@ const shippedSql = `using (
     <!-- ---- intro ---- -->
     <header class="intro">
       <p class="mark mono">// about this build</p>
-      <h1>A multi-tenant findings console, isolated at the database</h1>
+      <h1>An audit portal, isolated at the database</h1>
       <p class="lede">
-        Bastion is a miniature tenant-facing security console: two organizations,
-        two users, 28 synthetic findings — and one rule that decides who sees
-        what. The client never filters by tenant; it can't. Every request
-        carries the user's JWT, Postgres resolves membership through the
-        <code>members</code> table, and only that organization's rows ever
-        leave the database. Switch demo accounts on the sign-in screen and
-        watch the dataset change — that's row-level security, not UI logic.
+        Bastion is what an external security team hands a client: two
+        organizations, 28 synthetic findings, each mapped to a root cause with
+        fix economics. The key design decision: tenant isolation is enforced by
+        <strong>Postgres row-level security</strong>, not by the UI — the client
+        never filters by organization because it can't. Every request carries
+        the user's JWT; Postgres resolves membership and only that org's rows
+        ever leave the database. The Attack Lab probes this boundary live with
+        raw API calls.
+      </p>
+      <p class="lede">
+        This v2 build runs in a dedicated schema (<span class="mono">bastion_v2</span>)
+        of the same Supabase project as v1 — same URL, same anon key, one
+        additive env var. The schema is a routing parameter, not a credential.
       </p>
       <ul class="stack mono">
         <li v-for="item in stack" :key="item">{{ item }}</li>
@@ -162,10 +260,10 @@ const shippedSql = `using (
         <h2>Schema</h2>
       </header>
       <p class="sec-intro">
-        Three tables, one join, every query path indexed.
-        <code>findings</code> is the tenant data;
-        <code>members</code> is the table every isolation policy resolves
-        through.
+        Eight tables: a tenant structure (org → department → project → team),
+        two membership tables, one global root-cause catalog, and the findings
+        themselves — each carrying its full scope path denormalized, so every
+        policy stays flat.
       </p>
 
       <div class="tables">
@@ -188,14 +286,16 @@ const shippedSql = `using (
         </article>
       </div>
 
-      <p class="meta-line mono">
-        members.org_id → organizations.id · members.user_id → auth.users.id ·
-        findings.org_id → organizations.id
-      </p>
-      <p class="meta-line mono">
-        enum severity: low · medium · high · critical &nbsp;/&nbsp; enum
-        finding_status: open · in_progress · resolved
-      </p>
+      <aside class="callout">
+        <p>
+          <strong>Composite foreign keys are the write-side boundary.</strong>
+          RLS controls who can <em>see</em> rows; these constraints control
+          which rows can <em>exist</em>. If a policy is ever misconfigured or
+          dropped, the schema still refuses to link tenants — defense in depth
+          means the layers fail independently.
+        </p>
+        <CodeBlock :code="fkSql" />
+      </aside>
     </section>
 
     <!-- ---- 02 RLS ---- -->
@@ -205,70 +305,107 @@ const shippedSql = `using (
         <h2>Row-level security</h2>
       </header>
       <p class="sec-intro">
-        RLS is the product decision in this build. Policies below are verbatim
-        from <code>supabase/01_schema.sql</code> (the idempotent
-        <code>drop policy if exists</code> guards are omitted for readability —
-        the repo file is the source of truth). Each policy also carries a
-        <code>comment on policy</code> statement, so its documentation lives
-        in the database itself and is queryable from the catalog.
+        RLS is enabled on <strong>every</strong> table — and the boundary is a
+        per-table decision, not a blanket. Source of truth:
+        <code>supabase/01_schema.sql</code>, every policy with a SQL comment.
       </p>
 
-      <CodeBlock filename="supabase/01_schema.sql — policies" :code="policySql" />
+      <CodeBlock filename="supabase/01_schema.sql — policy pattern" :code="policySql" />
+
+      <h3 class="sub-head">The boundary matrix</h3>
+      <table class="matrix mono">
+        <thead>
+          <tr>
+            <th>table</th>
+            <th>org boundary</th>
+            <th>team boundary</th>
+            <th>note</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>findings</td>
+            <td class="on">✓ enforced</td>
+            <td class="avail">○ available</td>
+            <td>the tenant boundary — policy applied</td>
+          </tr>
+          <tr>
+            <td>departments · projects · teams</td>
+            <td class="on">✓ enforced</td>
+            <td class="avail">○ available</td>
+            <td>identical flat predicate</td>
+          </tr>
+          <tr>
+            <td>team_members</td>
+            <td class="on">✓ enforced</td>
+            <td>—</td>
+            <td>resolves the team-level policy</td>
+          </tr>
+          <tr>
+            <td>organizations · members</td>
+            <td class="on">✓ enforced</td>
+            <td>—</td>
+            <td>members: own rows only</td>
+          </tr>
+          <tr>
+            <td>root_causes</td>
+            <td class="glob">global</td>
+            <td>—</td>
+            <td>reference data — see classification</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="matrix-legend mono">
+        ✓ applied · ○ written and one statement away · global = intentionally
+        permissive
+      </p>
 
       <h3 class="sub-head">
         Why <code>(select auth.uid())</code> and not <code>auth.uid()</code>?
       </h3>
       <p class="sec-intro">
-        In a policy, a bare <code>auth.uid()</code> is planned as a per-row
-        expression: Postgres calls the function for every row it scans.
-        Wrapped in a scalar subquery, the planner hoists it into an
-        <strong>InitPlan</strong> — evaluated exactly once per statement, the
-        result cached for every row. The membership lookup gets the same
-        treatment: <code>in (select …)</code> executes once and is hashed into
-        a semi-join, instead of a correlated <code>exists (…)</code>
-        re-checked per row.
+        A bare <code>auth.uid()</code> is planned as a per-row expression —
+        called once per row scanned. Wrapped in a scalar subquery, the planner
+        hoists it into an <strong>InitPlan</strong>: evaluated exactly once per
+        statement, cached for every row. Identical rows, identical semantics,
+        very different cost.
       </p>
 
       <div class="duo">
         <div class="duo-item">
-          <p class="duo-label bad mono">✕ naive — evaluated per row</p>
+          <p class="duo-label bad mono">✕ naive — per row</p>
           <CodeBlock :code="naiveSql" />
-          <p class="duo-note">
-            The function is called once per row scanned, and the membership
-            subquery can degrade into a correlated re-check per row.
-          </p>
         </div>
         <div class="duo-item">
-          <p class="duo-label good mono">✓ shipped — evaluated per statement</p>
+          <p class="duo-label good mono">✓ shipped — per statement</p>
           <CodeBlock :code="shippedSql" />
-          <p class="duo-note">
-            Hoisted into an InitPlan: one evaluation, cached. The membership
-            set is computed once and hashed. The entire difference is a pair
-            of parentheses.
-          </p>
         </div>
       </div>
 
-      <p class="sec-intro">
-        Identical rows, identical semantics, identical security. On 28 demo
-        rows the difference is invisible; on a production findings table it's
-        the difference between an index scan and a function call per row. This
-        is exactly the pattern Supabase's own RLS performance guidance
-        recommends.
-      </p>
-
       <aside class="callout">
         <p>
-          <strong>The anon key ships in the browser bundle — public by design.</strong>
-          The <code>anon</code> role holds table-level SELECT on all three
-          tables, but no policy matches it, so every query it makes returns
-          zero rows. Enforcement lives in the database, not in the client.
-          <code>supabase/03_verify_rls.sql</code> proves all three access
-          levels from the SQL editor: <strong>15 rows</strong> for
-          <code>ada@apex.test</code>, <strong>13 rows</strong> for
-          <code>sam@meridian.test</code>, <strong>0</strong> for anon.
+          <strong>Data classification: the one permissive policy is a decision,
+          not an oversight.</strong>
+          <code>root_causes</code> holds public knowledge about the world —
+          CVE/CWE codes, fix guidance — with zero tenant columns, so sharing it
+          across tenants leaks nothing and creates no inference channel (row
+          existence can't correlate with any tenant). The invariant that keeps
+          it safe: <strong>tenant-derived data never enters this table.</strong>
+          The day a client-specific root cause is needed, that row becomes
+          tenant data and the policy changes. Also note: the anon key ships in
+          the browser bundle by design — no policy matches the
+          <code>anon</code> role, so it reads zero rows from every table.
+          Enforcement lives in the database, not in key secrecy.
         </p>
       </aside>
+
+      <h3 class="sub-head">The team-level boundary — designed, not enabled</h3>
+      <p class="sec-intro">
+        Today every org member sees their whole org (role is display-only).
+        If a client requires need-to-know between teams, this is the entire
+        change — no migration, no new tables:
+      </p>
+      <CodeBlock filename="documented — apply when the business requires it" :code="teamPolicySql" />
     </section>
 
     <!-- ---- 03 build notes ---- -->
@@ -277,41 +414,38 @@ const shippedSql = `using (
         <span class="sec-num mono">03</span>
         <h2>Notes from the build</h2>
       </header>
-      <p class="sec-intro">
-        Two incidents from building this demo that shaped how it verifies
-        itself.
-      </p>
-
       <div class="notes">
         <article class="note-card panel">
           <h4>The database's own error hint proposed the insecure fix</h4>
           <p>
-            While wiring up the RLS verification script, a query failed with
-            <code>permission denied for table users</code> — and Postgres's
-            hint suggested <code>GRANT SELECT ON auth.users TO authenticated</code>.
-            Granting it would have made the error vanish, and created a
-            cross-tenant PII leak: <code>authenticated</code> means
-            <em>any signed-in user of any tenant</em>, so every user could
-            have read every other user's email and ID. The actual bug was
-            ordering — a privileged lookup ran after the role had already
-            dropped. Fixed by reading privileged data before dropping
-            privileges, never by widening the grant.
+            A query failed on <code>auth.users</code> and Postgres suggested
+            <code>GRANT SELECT … TO authenticated</code> — which would have let
+            any signed-in user of any tenant read every other user's email.
+            The real bug was ordering: a privileged lookup ran after the role
+            had dropped. Fixed by reordering, never by widening the grant.
           </p>
-          <p class="rule mono">// rule: read an error hint as telemetry about which check failed — not as security advice</p>
+          <p class="rule mono">// rule: an error hint is telemetry about which check failed — not security advice</p>
         </article>
-
         <article class="note-card panel">
           <h4>A test that could pass while broken</h4>
           <p>
-            The first verification script built a JWT claim with a user-ID
-            lookup. When the lookup silently returned null,
-            <code>auth.uid()</code> returned null too — and both tenants saw
-            zero rows, which looks exactly like a passing isolation test. The
-            rewrite asserts its preconditions (both users exist, memberships
-            = 2) and raises loudly on violation, so the script can never pass
-            vacuously.
+            The first RLS verification script silently produced a null user ID
+            when a lookup missed — and both tenants seeing zero rows looks
+            exactly like a passing isolation test. The rewrite asserts its
+            preconditions and raises loudly.
           </p>
-          <p class="rule mono">// rule: verification must fail loudly when its assumptions break — a test that passes while broken is worse than no test</p>
+          <p class="rule mono">// rule: verification must fail loudly when its assumptions break</p>
+        </article>
+        <article class="note-card panel">
+          <h4>The silent wrong-schema bug</h4>
+          <p>
+            With two schemas in one project, raw REST calls without an
+            <code>Accept-Profile</code> header don't error — they silently
+            query the first exposed schema. The Attack Lab's probes would have
+            attacked v1's tables while displaying v2's UI. Every raw request
+            now pins its schema explicitly.
+          </p>
+          <p class="rule mono">// rule: multi-tenant-by-schema fails silently — pin the profile header</p>
         </article>
       </div>
     </section>
@@ -322,49 +456,44 @@ const shippedSql = `using (
         <span class="sec-num mono">04</span>
         <h2>Run it locally</h2>
       </header>
-      <p class="sec-intro">
-        Fresh clone to running app. Free tiers throughout; only env vars
-        needed.
-      </p>
-
       <ol class="steps">
         <li class="step">
           <div>
             <p class="step-title">Clone and install</p>
             <p class="step-body">
-              <code>git clone &lt;repo-url&gt; bastion</code> then
-              <code>npm install</code>. Node 20.19+ or 22.12+.
+              <code>git clone &lt;repo&gt; bastion</code>, checkout
+              <code>demo2</code>, <code>npm install</code>. Node 20.19+ or
+              22.12+.
             </p>
           </div>
         </li>
         <li class="step">
           <div>
-            <p class="step-title">Create a Supabase project</p>
+            <p class="step-title">Expose the schema</p>
             <p class="step-body">
-              Free tier, any region. Create it at supabase.com → New project.
+              Supabase → Project Settings → API → Exposed schemas: add
+              <code>bastion_v2</code>. Keep <code>public</code> first — the v1
+              app relies on it being the default.
             </p>
           </div>
         </li>
         <li class="step">
           <div>
-            <p class="step-title">Create the two demo users</p>
+            <p class="step-title">Create the demo users</p>
             <p class="step-body">
-              Authentication → Sign In / Up: switch off
-              <code>Confirm email</code> <em>before</em> creating users. Then
-              Users → Add user → Create new user:
-              <code>ada@apex.test</code> and <code>sam@meridian.test</code>,
-              password <code>demo1234</code> each.
+              Authentication → Sign In / Up: turn <em>off</em> "Confirm email"
+              first. Then create <code>ada@apex.test</code> and
+              <code>sam@meridian.test</code>, password <code>demo1234</code>.
             </p>
           </div>
         </li>
         <li class="step">
           <div>
-            <p class="step-title">Run the SQL files in order</p>
+            <p class="step-title">Run the SQL files</p>
             <p class="step-body">
-              SQL Editor: <code>01_schema.sql</code> →
+              SQL Editor, in order: <code>01_schema.sql</code> →
               <code>02_seed.sql</code> → <code>03_verify_rls.sql</code>.
-              Expected verify results: 15 rows (Apex only) · 13 rows
-              (Meridian only) · 0 (anon).
+              Expected verify: ada 15/4/11/12/22 · sam 13/3/8/8/22 · anon 0.
             </p>
           </div>
         </li>
@@ -372,31 +501,27 @@ const shippedSql = `using (
           <div>
             <p class="step-title">Configure env vars</p>
             <p class="step-body">
-              Copy <code>.env.example</code> to <code>.env</code> and fill
-              <code>NUXT_PUBLIC_SUPABASE_URL</code> and
-              <code>NUXT_PUBLIC_SUPABASE_ANON_KEY</code> from Project
-              Settings → API. Values are read at server start — restart
-              <code>npm run dev</code> after any change. <code>.env</code> is
-              gitignored.
+              <code>.env</code>: <code>NUXT_PUBLIC_SUPABASE_URL</code>,
+              <code>NUXT_PUBLIC_SUPABASE_ANON_KEY</code>, and
+              <code>NUXT_PUBLIC_SUPABASE_SCHEMA=bastion_v2</code>. Restart dev
+              after any change — env is read at startup.
             </p>
           </div>
         </li>
         <li class="step">
           <div>
             <p class="step-title">Run</p>
-            <p class="step-body">
-              <code>npm run dev</code> → <code>http://localhost:3000</code>.
-            </p>
+            <p class="step-body"><code>npm run dev</code> → http://localhost:3000</p>
           </div>
         </li>
         <li class="step">
           <div>
-            <p class="step-title">Deploy (optional)</p>
+            <p class="step-title">Deploy (Cloudflare Workers)</p>
             <p class="step-body">
-              Cloudflare Pages, build command <code>npm run generate</code>,
-              output directory <code>.output/public</code>. Set both
-              <code>NUXT_PUBLIC_*</code> env vars <em>before</em> the first
-              build — a static bundle bakes them in at build time.
+              Build <code>npm run generate && rm -rf .output/server .wrangler</code>
+              · deploy <code>npx wrangler deploy --config wrangler.jsonc</code>
+              · production branch <code>demo2</code> · all three
+              <code>NUXT_PUBLIC_*</code> vars set before the first build.
             </p>
           </div>
         </li>
@@ -411,8 +536,6 @@ const shippedSql = `using (
   display: grid;
   gap: 2.5rem;
 }
-
-/* ---- intro ---- */
 
 .mark {
   color: var(--accent);
@@ -453,8 +576,6 @@ h1 {
   white-space: nowrap;
 }
 
-/* ---- sections ---- */
-
 .sec {
   border-top: 1px solid var(--border);
   padding-top: 2rem;
@@ -490,7 +611,6 @@ h2 {
   margin: 2rem 0 0.75rem;
 }
 
-/* inline code in prose (scoped — CodeBlock's internals are unaffected) */
 .about :deep(code) {
   font-family: var(--font-mono);
   font-size: 0.85em;
@@ -586,15 +706,38 @@ h2 {
   color: var(--text-faint);
 }
 
-.meta-line {
+/* ---- boundary matrix ---- */
+
+.matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-xs);
+  margin-bottom: 0.4rem;
+}
+.matrix th {
+  text-align: left;
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
+  font-weight: 500;
+  padding: 0.45rem 0.7rem;
+  border-bottom: 1px solid var(--border-strong);
+}
+.matrix td {
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.matrix td.on { color: var(--accent); }
+.matrix td.avail { color: var(--text-muted); }
+.matrix td.glob { color: var(--sev-medium); }
+.matrix-legend {
   font-size: var(--text-2xs);
   color: var(--text-faint);
-  line-height: 1.8;
-  overflow-wrap: anywhere;
 }
-.meta-line + .meta-line { margin-top: 0.15rem; }
 
-/* ---- RLS extras ---- */
+/* ---- callouts, duo, notes, steps (shared with v1 patterns) ---- */
 
 .duo {
   display: grid;
@@ -610,12 +753,6 @@ h2 {
 }
 .duo-label.bad { color: var(--sev-critical); }
 .duo-label.good { color: var(--accent); }
-.duo-note {
-  margin-top: 0.6rem;
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-  line-height: 1.6;
-}
 
 .callout {
   margin-top: 1.25rem;
@@ -630,12 +767,11 @@ h2 {
   line-height: 1.7;
 }
 .callout strong { color: var(--text); }
-
-/* ---- build notes ---- */
+.callout .code-block-host { margin-top: 0.9rem; }
 
 .notes {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 0.9rem;
 }
 .note-card {
@@ -662,8 +798,6 @@ h2 {
   border-top: 1px dashed var(--border-strong);
   overflow-wrap: anywhere;
 }
-
-/* ---- steps ---- */
 
 .steps {
   list-style: none;
@@ -697,8 +831,6 @@ h2 {
   line-height: 1.75;
   max-width: 44rem;
 }
-
-/* ---- responsive ---- */
 
 @media (max-width: 900px) {
   .duo,

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import type { Finding, Severity } from '~/types'
+import type { ScopedFinding, Severity } from '~/types'
+import { FIX_EFFORT_LABELS, FIX_METHOD_LABELS } from '~/utils/labels'
 
-const props = defineProps<{ finding: Finding | null }>()
+const props = defineProps<{ finding: ScopedFinding | null }>()
 const emit = defineEmits<{ close: [] }>()
 
 const closeBtn = ref<HTMLButtonElement | null>(null)
@@ -22,10 +23,7 @@ function onKeydown(e: KeyboardEvent) {
   }
 
   // Tab trap: aria-modal="true" promises focus stays in the dialog.
-  // Tab wraps last→first, Shift+Tab wraps first→last; if focus ever
-  // escapes to the page behind the backdrop, it is pulled back in.
   if (e.key !== 'Tab') return
-
   const root = drawerEl.value
   if (!root) return
 
@@ -53,9 +51,6 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
-// Open: lock scroll, remember focus, focus the close button.
-// Swap A→B (row clicked while open): content only — no focus steal.
-// Close: unlock, restore focus to the row that opened it.
 watch(
   () => props.finding,
   (f, prev) => {
@@ -99,7 +94,7 @@ onBeforeUnmount(() => {
         <header class="drawer-head">
           <div class="badges">
             <SeverityBadge :severity="finding.severity" />
-            <StatusPill :status="finding.status" />
+            <span class="rc-chip mono">{{ finding.rootCause.code }}</span>
           </div>
           <button
             ref="closeBtn"
@@ -114,7 +109,14 @@ onBeforeUnmount(() => {
 
         <div class="drawer-body">
           <h2 class="title">{{ finding.title }}</h2>
-          <p class="asset mono">{{ finding.asset }}</p>
+          <p class="asset mono">
+            {{ finding.asset }}<template v-if="finding.affected_component"> · {{ finding.affected_component }}</template>
+          </p>
+
+          <p class="scope mono">
+            {{ finding.department.name }} › {{ finding.project.name }} ›
+            {{ finding.team.name }}
+          </p>
 
           <div class="meta">
             <div class="meta-item">
@@ -138,6 +140,38 @@ onBeforeUnmount(() => {
 
           <p class="meta-label">Description</p>
           <p class="description">{{ finding.description }}</p>
+
+          <!-- Root cause: the remediation intel — why it exists and what
+               kills it. This is the auditor's value-add. -->
+          <div class="rc-card">
+            <p class="meta-label">Root cause</p>
+            <p class="rc-title-row">
+              <span class="rc-code mono">{{ finding.rootCause.code }}</span>
+              <span class="rc-name">{{ finding.rootCause.title }}</span>
+            </p>
+            <ul class="rc-facts mono">
+              <li>
+                fix available:
+                <template v-if="finding.rootCause.fix_available">
+                  <span class="yes">✓ yes</span>
+                </template>
+                <template v-else>
+                  <span class="no">✗ not yet</span>
+                </template>
+              </li>
+              <li v-if="finding.rootCause.fix_available && finding.rootCause.fix_method">
+                method: {{ FIX_METHOD_LABELS[finding.rootCause.fix_method] }}
+              </li>
+              <li v-if="finding.rootCause.fix_available && finding.rootCause.fix_effort">
+                effort: {{ FIX_EFFORT_LABELS[finding.rootCause.fix_effort] }}
+              </li>
+              <li>first discovered: {{ formatDate(finding.rootCause.first_discovered) }}</li>
+            </ul>
+            <p v-if="finding.rootCause.workaround" class="rc-workaround">
+              <span class="wk-label mono">workaround</span>
+              {{ finding.rootCause.workaround }}
+            </p>
+          </div>
         </div>
 
         <footer class="drawer-foot mono">
@@ -159,7 +193,6 @@ onBeforeUnmount(() => {
   -webkit-backdrop-filter: blur(2px);
 }
 
-/* Layers above the topbar (z-40). */
 .drawer {
   position: fixed;
   top: 0;
@@ -182,7 +215,19 @@ onBeforeUnmount(() => {
   padding: 1rem 1.4rem;
   border-bottom: 1px solid var(--border);
 }
-.badges { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.badges {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.rc-chip {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 0.22rem 0.5rem;
+}
 
 .close {
   flex-shrink: 0;
@@ -214,6 +259,12 @@ onBeforeUnmount(() => {
   margin-top: 0.45rem;
   font-size: var(--text-xs);
   color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.scope {
+  margin-top: 0.5rem;
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
   overflow-wrap: anywhere;
 }
 
@@ -264,6 +315,61 @@ onBeforeUnmount(() => {
   line-height: 1.7;
 }
 
+/* ---- root-cause card ---- */
+
+.rc-card {
+  margin-top: 1.4rem;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--bg-raised);
+  padding: 0.9rem 1.1rem;
+}
+
+.rc-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.rc-code {
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+.rc-name {
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.rc-facts {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.25rem;
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+}
+.yes { color: var(--accent); }
+.no { color: var(--text-muted); }
+
+.rc-workaround {
+  margin-top: 0.7rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed var(--border-strong);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+.wk-label {
+  display: block;
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
+  margin-bottom: 0.2rem;
+}
+
 .drawer-foot {
   padding: 0.9rem 1.4rem;
   border-top: 1px solid var(--border);
@@ -272,7 +378,6 @@ onBeforeUnmount(() => {
   line-height: 1.6;
 }
 
-/* Slide + fade */
 .drawer-enter-active,
 .drawer-leave-active {
   transition: transform 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);

@@ -31,7 +31,8 @@ async function handleSignOut() {
             <path d="M16 17v3.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
           </svg>
           <span class="brand-name">Bastion</span>
-          <span class="brand-tag mono">findings console</span>
+          <!-- <span class="brand-tag mono">findings console</span> -->
+          <span class="brand-tag mono">Audit Portal</span>
         </NuxtLink>
 
         <nav class="nav" aria-label="Primary">
@@ -66,7 +67,7 @@ async function handleSignOut() {
     </main>
 
     <footer class="footer">
-      <span class="mono">bastion · demo build · synthetic findings</span>
+      <span class="mono">bastion · audit portal · synthetic findings</span>
       <span class="mono">tenant isolation: postgres row-level security</span>
     </footer>
   </div>

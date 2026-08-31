@@ -1,20 +1,14 @@
 <script setup lang="ts">
-import type { Finding, FindingStatus, Severity } from '~/types'
+import type { ScopedFinding, Severity } from '~/types'
+import { SEVERITY_LABELS, SEVERITY_ORDER } from '~/utils/labels'
 
 const props = defineProps<{
-  findings: Finding[]
+  findings: ScopedFinding[]
   loading?: boolean
   activeSeverity?: Severity | 'all'
 }>()
 
 const emit = defineEmits<{ select: [severity: Severity] }>()
-
-const SEVERITIES: { key: Severity; label: string }[] = [
-  { key: 'critical', label: 'Critical' },
-  { key: 'high', label: 'High' },
-  { key: 'medium', label: 'Medium' },
-  { key: 'low', label: 'Low' }
-]
 
 const counts = computed(() => {
   const c: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0 }
@@ -22,10 +16,17 @@ const counts = computed(() => {
   return c
 })
 
-const statusCounts = computed(() => {
-  const s: Record<FindingStatus, number> = { open: 0, in_progress: 0, resolved: 0 }
-  for (const f of props.findings) s[f.status]++
-  return s
+// Scope of the audit: which parts of the org have findings at all.
+const scopeCounts = computed(() => {
+  const depts = new Set<string>()
+  const projects = new Set<string>()
+  const teams = new Set<string>()
+  for (const f of props.findings) {
+    depts.add(f.department.id)
+    projects.add(f.project.id)
+    teams.add(f.team.id)
+  }
+  return { depts: depts.size, projects: projects.size, teams: teams.size }
 })
 
 const total = computed(() => props.findings.length)
@@ -37,8 +38,8 @@ function onChip(s: Severity) {
 </script>
 
 <template>
-  <!-- Instrument panel, not marketing cards: one panel, total at left,
-       proportional severity bar at right. Every part is pressable. -->
+  <!-- Instrument panel: total at left, proportional severity bar at right.
+       Severity-only, permanently: it answers "how bad", never "where". -->
   <section class="kpi panel" aria-label="Findings summary by severity">
     <div v-if="loading" class="kpi-grid" aria-hidden="true">
       <div class="total-col">
@@ -55,42 +56,42 @@ function onChip(s: Severity) {
       <div class="total-col">
         <p class="num mono">{{ total }}</p>
         <p class="cap">findings</p>
-        <p class="status mono">
-          {{ statusCounts.open }} open · {{ statusCounts.in_progress }} in
-          progress · {{ statusCounts.resolved }} resolved
+        <p class="scope mono">
+          {{ scopeCounts.depts }} departments · {{ scopeCounts.projects }}
+          projects · {{ scopeCounts.teams }} teams affected
         </p>
       </div>
 
       <div class="bar-col">
         <div class="legend" role="group" aria-label="Filter by severity">
           <button
-            v-for="s in SEVERITIES"
-            :key="s.key"
+            v-for="s in SEVERITY_ORDER"
+            :key="s"
             type="button"
             class="chip"
-            :class="[s.key, { active: activeSeverity === s.key, zero: counts[s.key] === 0 }]"
-            :aria-pressed="activeSeverity === s.key"
-            :disabled="counts[s.key] === 0"
-            @click="onChip(s.key)"
+            :class="[s, { active: activeSeverity === s, zero: counts[s] === 0 }]"
+            :aria-pressed="activeSeverity === s"
+            :disabled="counts[s] === 0"
+            @click="onChip(s)"
           >
             <span class="chip-dot" aria-hidden="true" />
-            <span class="lbl">{{ s.label }}</span>
-            <span class="cnt mono">{{ counts[s.key] }}</span>
+            <span class="lbl">{{ SEVERITY_LABELS[s] }}</span>
+            <span class="cnt mono">{{ counts[s] }}</span>
           </button>
         </div>
 
         <div class="bar" :class="{ empty: total === 0 }" aria-hidden="true">
           <button
-            v-for="s in SEVERITIES"
-            v-show="counts[s.key] > 0"
-            :key="s.key"
+            v-for="s in SEVERITY_ORDER"
+            v-show="counts[s] > 0"
+            :key="s"
             type="button"
             class="seg"
-            :class="s.key"
-            :style="{ flexGrow: counts[s.key] }"
-            :title="`${counts[s.key]} ${s.label.toLowerCase()}`"
+            :class="s"
+            :style="{ flexGrow: counts[s] }"
+            :title="`${counts[s]} ${SEVERITY_LABELS[s].toLowerCase()}`"
             tabindex="-1"
-            @click="onChip(s.key)"
+            @click="onChip(s)"
           />
         </div>
       </div>
@@ -110,7 +111,9 @@ function onChip(s: Severity) {
   align-items: center;
 }
 
-.total-col { min-width: 9rem; }
+.total-col {
+  min-width: 11rem;
+}
 .num {
   font-size: 1.9rem;
   font-weight: 600;
@@ -122,7 +125,7 @@ function onChip(s: Severity) {
   font-size: var(--text-xs);
   margin-top: 0.2rem;
 }
-.status {
+.scope {
   color: var(--text-faint);
   font-size: var(--text-2xs);
   margin-top: 0.6rem;
@@ -172,7 +175,6 @@ function onChip(s: Severity) {
   cursor: default;
 }
 
-/* Proportional severity bar: segment width = share of total. */
 .bar {
   display: flex;
   gap: 3px;
@@ -200,17 +202,16 @@ function onChip(s: Severity) {
 .medium   { --c: var(--sev-medium);   --c-bg: var(--sev-medium-bg); }
 .low      { --c: var(--sev-low);      --c-bg: var(--sev-low-bg); }
 
-/* Skeletons */
-.skel-num  { display: block; width: 64px; height: 30px; }
-.skel-cap  { display: block; width: 56px; height: 10px; margin-top: 10px; }
+.skel-num { display: block; width: 64px; height: 30px; }
+.skel-cap { display: block; width: 56px; height: 10px; margin-top: 10px; }
 .skel-legend { display: block; width: 62%; height: 26px; border-radius: 999px; }
-.skel-bar  { display: block; width: 100%; height: 10px; }
+.skel-bar { display: block; width: 100%; height: 10px; }
 
 @media (max-width: 720px) {
   .kpi-grid {
     grid-template-columns: 1fr;
     gap: 1rem;
   }
-  .status { white-space: normal; }
+  .scope { white-space: normal; }
 }
 </style>

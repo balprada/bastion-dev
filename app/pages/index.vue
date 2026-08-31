@@ -1,83 +1,407 @@
 <script setup lang="ts">
-import type { Finding, FindingStatus, Severity } from '~/types'
+import type {
+  Department,
+  FacetGroup,
+  FacetId,
+  Finding,
+  FixEffort,
+  FixMethod,
+  Project,
+  RootCause,
+  ScopedFinding,
+  Severity,
+  Team
+} from '~/types'
+import { FACET_IDS } from '~/types'
+import {
+  FIX_EFFORT_LABELS,
+  FIX_METHOD_LABELS,
+  NO_FIX,
+  NO_FIX_LABEL,
+  SEVERITY_LABELS,
+  SEVERITY_ORDER
+} from '~/utils/labels'
 
 useHead({ title: 'Findings — Bastion' })
 
 const supabase = useSupabase()
 const { org } = useSession()
 
-// ---- data -----------------------------------------------------------------
-
-// One RLS-scoped query per login — this request IS the tenant-isolation
-// demo. Filtering happens client-side on ≤15 rows.
-const findings = ref<Finding[]>([])
+// ---- data --------------------------------------------------------------------
+// Five parallel RLS-scoped queries; joins happen client-side on ≤30 rows.
+// (PostgREST can't embed through the composite FKs that enforce tenant
+// integrity — and "five queries, one policy" is the better RLS story anyway.)
+const scopedFindings = ref<ScopedFinding[]>([])
+const departments = ref<Department[]>([])
+const projects = ref<Project[]>([])
+const teams = ref<Team[]>([])
+const rootCauses = ref<RootCause[]>([])
 const loadState = ref<'loading' | 'ok' | 'error'>('loading')
 const loadError = ref('')
 
-async function loadFindings() {
+async function loadAll() {
   loadState.value = 'loading'
   loadError.value = ''
 
-  const { data, error } = await supabase
-    .from('findings')
-    .select('*')
-    .order('cvss', { ascending: false })
-    .order('detected_at', { ascending: false })
+  const [fRes, dRes, pRes, tRes, rRes] = await Promise.all([
+    supabase
+      .from('findings')
+      .select('*')
+      .order('cvss', { ascending: false })
+      .order('detected_at', { ascending: false }),
+    supabase.from('departments').select('*').order('name'),
+    supabase.from('projects').select('*').order('name'),
+    supabase.from('teams').select('*').order('name'),
+    supabase.from('root_causes').select('*')
+  ])
 
-  if (error) {
+  const firstError = [fRes, dRes, pRes, tRes, rRes].find((r) => r.error)?.error
+  if (firstError) {
     loadState.value = 'error'
-    loadError.value = error.message
+    loadError.value = firstError.message
     return
   }
 
-  // numeric(3,1) arrives as a JSON number; normalize defensively.
-  findings.value = (data ?? []).map((r) => ({ ...r, cvss: Number(r.cvss) })) as Finding[]
+  const deptMap = new Map((dRes.data ?? []).map((d) => [d.id, d as Department]))
+  const projMap = new Map((pRes.data ?? []).map((p) => [p.id, p as Project]))
+  const teamMap = new Map((tRes.data ?? []).map((t) => [t.id, t as Team]))
+  const rcMap = new Map((rRes.data ?? []).map((r) => [r.id, r as RootCause]))
+
+  const joined: ScopedFinding[] = []
+  for (const row of (fRes.data ?? []) as Finding[]) {
+    const department = deptMap.get(row.department_id)
+    const project = projMap.get(row.project_id)
+    const team = teamMap.get(row.team_id)
+    const rootCause = rcMap.get(row.root_cause_id)
+    if (!department || !project || !team || !rootCause) continue // defensive
+    joined.push({ ...row, cvss: Number(row.cvss), department, project, team, rootCause })
+  }
+
+  scopedFindings.value = joined
+  departments.value = dRes.data ?? []
+  projects.value = pRes.data ?? []
+  teams.value = tRes.data ?? []
+  rootCauses.value = rRes.data ?? []
   loadState.value = 'ok'
 }
 
-onMounted(loadFindings)
+onMounted(loadAll)
 
-const hasAny = computed(() => findings.value.length > 0)
+const hasAny = computed(() => scopedFindings.value.length > 0)
 
-// ---- filters ----------------------------------------------------------------
+// ---- search ------------------------------------------------------------------
+// Global, and deliberately spans root-cause codes/titles: typing "log4shell"
+// or "CWE-798" works. And it inherits RLS — as Apex you can search for a
+// Meridian root cause all day; only findings in YOUR org can ever match.
 
 const search = ref('')
-const severityFilter = ref<Severity | 'all'>('all')
-const statusFilter = ref<FindingStatus | 'all'>('all')
+const q = computed(() => search.value.trim().toLowerCase())
 
-const filtersActive = computed(
-  () =>
-    search.value.trim() !== '' ||
-    severityFilter.value !== 'all' ||
-    statusFilter.value !== 'all'
+function matchesSearch(f: ScopedFinding): boolean {
+  const s = q.value
+  if (!s) return true
+  return [f.title, f.asset, f.affected_component, f.rootCause.code, f.rootCause.title].some(
+    (t) => t.toLowerCase().includes(s)
+  )
+}
+
+// ---- facet engine --------------------------------------------------------------
+// Selections: OR within a group, AND across groups. Counts are cross-filtered:
+// each group's counts reflect every OTHER active filter (and the search).
+
+function emptySelections(): Record<FacetId, string[]> {
+  return {
+    severity: [],
+    department: [],
+    project: [],
+    team: [],
+    software: [],
+    rootCause: [],
+    fixMethod: [],
+    fixEffort: []
+  }
+}
+
+const selections = reactive(emptySelections())
+
+function facetValueOf(f: ScopedFinding, g: FacetId): string {
+  switch (g) {
+    case 'severity':
+      return f.severity
+    case 'department':
+      return f.department.id
+    case 'project':
+      return f.project.id
+    case 'team':
+      return f.team.id
+    case 'software':
+      return f.affected_component
+    case 'rootCause':
+      return f.rootCause.id
+    case 'fixMethod':
+      return f.rootCause.fix_available ? (f.rootCause.fix_method ?? NO_FIX) : NO_FIX
+    case 'fixEffort':
+      return f.rootCause.fix_available ? (f.rootCause.fix_effort ?? NO_FIX) : NO_FIX
+  }
+}
+
+function passesGroup(f: ScopedFinding, g: FacetId): boolean {
+  const sel = selections[g]
+  if (!sel.length) return true
+  return sel.includes(facetValueOf(f, g))
+}
+
+const filtered = computed(() =>
+  scopedFindings.value.filter(
+    (f) => FACET_IDS.every((g) => passesGroup(f, g)) && matchesSearch(f)
+  )
 )
 
-const filtered = computed(() => {
-  const q = search.value.trim().toLowerCase()
-  return findings.value.filter((f) => {
-    if (severityFilter.value !== 'all' && f.severity !== severityFilter.value) return false
-    if (statusFilter.value !== 'all' && f.status !== statusFilter.value) return false
-    if (q && !f.title.toLowerCase().includes(q) && !f.asset.toLowerCase().includes(q)) {
-      return false
-    }
-    return true
-  })
+// Hierarchy: child facets show descendants of the parent selection.
+const projectCandidates = computed(() =>
+  selections.department.length
+    ? projects.value.filter((p) => selections.department.includes(p.department_id))
+    : projects.value
+)
+
+const teamCandidates = computed(() => {
+  if (selections.project.length) {
+    return teams.value.filter((t) => selections.project.includes(t.project_id))
+  }
+  if (selections.department.length) {
+    const pIds = new Set(projectCandidates.value.map((p) => p.id))
+    return teams.value.filter((t) => pIds.has(t.project_id))
+  }
+  return teams.value
 })
 
-function clearFilters() {
+function pruneScope() {
+  const pIds = new Set(projectCandidates.value.map((p) => p.id))
+  if (selections.department.length) {
+    selections.project = selections.project.filter((id) => pIds.has(id))
+  }
+  const tIds = new Set(teamCandidates.value.map((t) => t.id))
+  if (selections.project.length || selections.department.length) {
+    selections.team = selections.team.filter((id) => tIds.has(id))
+  }
+}
+
+function toggle(g: FacetId, v: string) {
+  const arr = selections[g]
+  const i = arr.indexOf(v)
+  if (i >= 0) arr.splice(i, 1)
+  else arr.push(v)
+  // Parent selection changed → drop child selections that are no longer
+  // visible. Deterministic, and standard cascading-facet behavior.
+  if (g === 'department' || g === 'project') pruneScope()
+}
+
+function clearAll() {
+  for (const g of FACET_IDS) selections[g] = []
   search.value = ''
-  severityFilter.value = 'all'
-  statusFilter.value = 'all'
 }
 
-// KPI strip segments and the severity dropdown drive the same filter.
+// Per-section clear from the rail. No prune needed: clearing a parent
+// group only WIDENS the candidate set — existing child selections remain
+// valid members of it.
+function clearGroup(id: FacetId) {
+  selections[id] = []
+}
+
+// Remediation impact panel → facet rail: clicking a root-cause row
+// isolates that cause; clicking the already-focused one releases it.
+function focusRootCause(id: string) {
+  selections.rootCause =
+    selections.rootCause.length === 1 && selections.rootCause[0] === id ? [] : [id]
+}
+
+const activeFilterCount = computed(
+  () => FACET_IDS.reduce((n, g) => n + selections[g].length, 0) + (q.value ? 1 : 0)
+)
+
+const filtersActive = computed(() => activeFilterCount.value > 0)
+
+// The rail's group model: candidates + cross-filtered counts.
+const facetGroups = computed<FacetGroup[]>(() => {
+  const countsFor = (exclude: FacetId) => {
+    const base = scopedFindings.value.filter(
+      (f) => FACET_IDS.every((g) => g === exclude || passesGroup(f, g)) && matchesSearch(f)
+    )
+    const m = new Map<string, number>()
+    for (const f of base) {
+      const v = facetValueOf(f, exclude)
+      m.set(v, (m.get(v) ?? 0) + 1)
+    }
+    return m
+  }
+
+  const byCount = (a: { count: number; label: string }, b: { count: number; label: string }) =>
+    b.count - a.count || a.label.localeCompare(b.label)
+
+  const keep = (id: FacetId, opts: { value: string; count: number }[]) =>
+    opts.filter((o) => o.count > 0 || selections[id].includes(o.value))
+
+  const groups: FacetGroup[] = []
+
+  // severity — canonical order, colored dots
+  const sevCounts = countsFor('severity')
+  groups.push({
+    id: 'severity',
+    label: 'Severity',
+    options: keep(
+      'severity',
+      SEVERITY_ORDER.map((s) => ({
+        value: s,
+        label: SEVERITY_LABELS[s],
+        tone: s,
+        count: sevCounts.get(s) ?? 0
+      }))
+    )
+  })
+
+  // department
+  const deptCounts = countsFor('department')
+  groups.push({
+    id: 'department',
+    label: 'Department',
+    options: keep(
+      'department',
+      departments.value.map((d) => ({ value: d.id, label: d.name, count: deptCounts.get(d.id) ?? 0 }))
+    ).sort(byCount)
+  })
+
+  // project — scoped by department, sub shows parent
+  const projCounts = countsFor('project')
+  const deptName = (id: string) => departments.value.find((d) => d.id === id)?.name
+  groups.push({
+    id: 'project',
+    label: 'Project',
+    scopedNote: selections.department.length
+      ? `scoped to ${selections.department.length} selected department${selections.department.length > 1 ? 's' : ''}`
+      : undefined,
+    options: keep(
+      'project',
+      projectCandidates.value.map((p) => ({
+        value: p.id,
+        label: p.name,
+        sub: deptName(p.department_id),
+        count: projCounts.get(p.id) ?? 0
+      }))
+    ).sort(byCount)
+  })
+
+  // team — scoped by project/department, sub shows parent
+  const teamCounts = countsFor('team')
+  const projName = (id: string) => projects.value.find((p) => p.id === id)?.name
+  const teamNote = selections.project.length
+    ? 'scoped to selected projects'
+    : selections.department.length
+      ? 'scoped to selected departments'
+      : undefined
+  groups.push({
+    id: 'team',
+    label: 'Team',
+    scopedNote: teamNote,
+    options: keep(
+      'team',
+      teamCandidates.value.map((t) => ({
+        value: t.id,
+        label: t.name,
+        sub: projName(t.project_id),
+        count: teamCounts.get(t.id) ?? 0
+      }))
+    ).sort(byCount)
+  })
+
+  // software (affected component)
+  const swCounts = countsFor('software')
+  const swCands = new Map<string, number>()
+  for (const f of scopedFindings.value) {
+    if (f.affected_component) swCands.set(f.affected_component, 0)
+  }
+  groups.push({
+    id: 'software',
+    label: 'Software',
+    options: keep(
+      'software',
+      [...swCands.keys()].map((c) => ({ value: c, label: c, count: swCounts.get(c) ?? 0 }))
+    ).sort(byCount)
+  })
+
+  // root cause — label = catalog code, sub = title
+  const rcCounts = countsFor('rootCause')
+  const rcCands = new Map<string, RootCause>()
+  for (const f of scopedFindings.value) rcCands.set(f.rootCause.id, f.rootCause)
+  groups.push({
+    id: 'rootCause',
+    label: 'Root cause',
+    options: keep(
+      'rootCause',
+      [...rcCands.entries()].map(([id, rc]) => ({
+        value: id,
+        label: rc.code,
+        sub: rc.title,
+        count: rcCounts.get(id) ?? 0
+      }))
+    ).sort(byCount)
+  })
+
+  // fix method — from the root-cause catalog; includes a "no fix" bucket
+  const fmCounts = countsFor('fixMethod')
+  const fmCands = new Map<string, string>()
+  for (const f of scopedFindings.value) {
+    const v = facetValueOf(f, 'fixMethod')
+    fmCands.set(
+      v,
+      v === NO_FIX ? NO_FIX_LABEL : (FIX_METHOD_LABELS[v as FixMethod] ?? v)
+    )
+  }
+  groups.push({
+    id: 'fixMethod',
+    label: 'Fix method',
+    options: keep(
+      'fixMethod',
+      [...fmCands.entries()].map(([v, label]) => ({ value: v, label, count: fmCounts.get(v) ?? 0 }))
+    ).sort(byCount)
+  })
+
+  // fix effort — canonical order, "no fix" last
+  const feCounts = countsFor('fixEffort')
+  const feOrder: string[] = ['low', 'medium', 'high', NO_FIX]
+  const fePresent = new Set(feOrder.filter((v) => scopedFindings.value.some((f) => facetValueOf(f, 'fixEffort') === v)))
+  groups.push({
+    id: 'fixEffort',
+    label: 'Fix effort',
+    options: keep(
+      'fixEffort',
+      feOrder
+        .filter((v) => fePresent.has(v))
+        .map((v) => ({
+          value: v,
+          label: v === NO_FIX ? NO_FIX_LABEL : FIX_EFFORT_LABELS[v as FixEffort],
+          count: feCounts.get(v) ?? 0
+        }))
+    )
+  })
+
+  return groups
+})
+
+const activeSeverity = computed<Severity | undefined>(() =>
+  selections.severity.length === 1 ? (selections.severity[0] as Severity) : undefined
+)
+
 function toggleSeverity(s: Severity) {
-  severityFilter.value = severityFilter.value === s ? 'all' : s
+  toggle('severity', s)
 }
 
-// ---- drawer -----------------------------------------------------------------
+// ---- drawer -------------------------------------------------------------------
 
-const selected = ref<Finding | null>(null)
+const selected = ref<ScopedFinding | null>(null)
+
+// ---- mobile filters ------------------------------------------------------------
+
+const mobileFiltersOpen = ref(false)
 </script>
 
 <template>
@@ -86,97 +410,90 @@ const selected = ref<Finding | null>(null)
       <div>
         <h1>Findings</h1>
         <p v-if="loadState === 'ok'" class="sub mono">
-          {{ org?.name ?? 'your organization' }} · {{ findings.length }} findings ·
+          {{ org?.name ?? 'your organization' }} · {{ scopedFindings.length }} findings ·
           sorted by CVSS
         </p>
       </div>
     </header>
 
-    <!-- Load error: honest state, one-click retry -->
     <div v-if="loadState === 'error'" class="error panel">
       <p class="error-title">Couldn't load findings</p>
       <p class="error-msg mono">{{ loadError }}</p>
-      <button class="btn btn-sm" type="button" @click="loadFindings">Retry</button>
+      <button class="btn btn-sm" type="button" @click="loadAll">Retry</button>
     </div>
 
     <template v-else>
       <KpiStrip
-        :findings="findings"
+        :findings="scopedFindings"
         :loading="loadState === 'loading'"
-        :active-severity="severityFilter"
+        :active-severity="activeSeverity ?? 'all'"
         @select="toggleSeverity"
       />
 
-      <div v-if="loadState === 'ok'" class="filters panel">
-        <div class="search-wrap">
-          <svg
-            class="search-icon"
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            aria-hidden="true"
-          >
-            <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" />
-            <path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-          </svg>
-          <input
-            v-model="search"
-            class="input search-input"
-            type="search"
-            placeholder="Search title or asset…"
-            aria-label="Search findings"
+      <RemediationImpact
+        :findings="scopedFindings"
+        :loading="loadState === 'loading'"
+        :active-root-cause="selections.rootCause.length === 1 ? selections.rootCause[0] : null"
+        @focus="focusRootCause"
+      />
+
+      <div class="board-cols">
+        <FacetRail
+          :groups="facetGroups"
+          :selections="selections"
+          :result-count="filtered.length"
+          :total-count="scopedFindings.length"
+          :loading="loadState === 'loading'"
+          :open="mobileFiltersOpen"
+          @toggle="toggle"
+          @clear="clearGroup"
+          @reset="clearAll"
+          @close="mobileFiltersOpen = false"
+        />
+
+        <div class="main-col">
+          <div class="toolbar">
+            <button
+              class="btn filters-btn"
+              type="button"
+              @click="mobileFiltersOpen = true"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M3 6h18M6 12h12M10 18h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+              </svg>
+              Filters
+              <span v-if="activeFilterCount" class="fbadge mono">{{ activeFilterCount }}</span>
+            </button>
+
+            <div class="search-wrap">
+              <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" />
+                <path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+              </svg>
+              <input
+                v-model="search"
+                class="input search-input"
+                type="search"
+                placeholder="Search title, asset, software, CVE/CWE…"
+                aria-label="Search findings"
+              />
+            </div>
+          </div>
+
+          <p v-if="loadState === 'ok' && filtersActive && hasAny" class="showing mono">
+            showing {{ filtered.length }} of {{ scopedFindings.length }}
+            <button class="clear-inline mono" type="button" @click="clearAll">reset</button>
+          </p>
+
+          <FindingsTable
+            :findings="filtered"
+            :loading="loadState === 'loading'"
+            :has-any="hasAny"
+            @select="selected = $event"
+            @clear="clearAll"
           />
         </div>
-
-        <select
-          v-model="severityFilter"
-          class="input select"
-          aria-label="Filter by severity"
-        >
-          <option value="all">All severities</option>
-          <option value="critical">Critical</option>
-          <option value="high">High</option>
-          <option value="medium">Medium</option>
-          <option value="low">Low</option>
-        </select>
-
-        <select
-          v-model="statusFilter"
-          class="input select"
-          aria-label="Filter by status"
-        >
-          <option value="all">All statuses</option>
-          <option value="open">Open</option>
-          <option value="in_progress">In progress</option>
-          <option value="resolved">Resolved</option>
-        </select>
-
-        <button
-          v-if="filtersActive"
-          class="btn btn-sm"
-          type="button"
-          @click="clearFilters"
-        >
-          Clear
-        </button>
       </div>
-
-      <p
-        v-if="loadState === 'ok' && filtersActive && hasAny"
-        class="showing mono"
-        aria-live="polite"
-      >
-        showing {{ filtered.length }} of {{ findings.length }}
-      </p>
-
-      <FindingsTable
-        :findings="filtered"
-        :loading="loadState === 'loading'"
-        :has-any="hasAny"
-        @select="selected = $event"
-        @clear="clearFilters"
-      />
     </template>
 
     <FindingDrawer :finding="selected" @close="selected = null" />
@@ -202,14 +519,36 @@ h1 {
   margin-top: 0.3rem;
 }
 
-/* ---- filters ---- */
-
-.filters {
+/* rail column + main column */
+.board-cols {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto auto auto;
+  grid-template-columns: 250px minmax(0, 1fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.main-col {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+/* toolbar: [Filters] on mobile only, search always */
+.toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.6rem;
-  align-items: center;
-  padding: 0.75rem 0.9rem;
+}
+
+.filters-btn {
+  display: none;
+}
+.fbadge {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-radius: 999px;
+  font-size: var(--text-2xs);
+  padding: 0.02rem 0.42rem;
 }
 
 .search-wrap {
@@ -227,7 +566,6 @@ h1 {
 .search-input {
   padding-left: 2.3rem;
 }
-/* Native clear ("x") button on search inputs — keep it dim */
 .search-input::-webkit-search-cancel-button {
   -webkit-appearance: none;
   width: 12px;
@@ -236,27 +574,28 @@ h1 {
   cursor: pointer;
 }
 
-.select {
-  width: auto;
-  appearance: none;
-  -webkit-appearance: none;
-  padding-right: 2.2rem;
-  cursor: pointer;
-  background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238b98a9' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 0.75rem center;
-}
-
 .showing {
-  text-align: right;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.6rem;
   font-size: var(--text-2xs);
   color: var(--text-faint);
   padding-right: 0.25rem;
-  margin: -0.35rem 0 -0.1rem;
+  margin: -0.2rem 0 -0.15rem;
+}
+.clear-inline {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  padding: 0;
 }
 
-/* ---- error state ---- */
-
+/* error state */
 .error {
   padding: 2rem 1.5rem;
   display: grid;
@@ -273,12 +612,15 @@ h1 {
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 720px) {
-  .filters {
-    grid-template-columns: 1fr 1fr;
+@media (max-width: 960px) {
+  .board-cols {
+    grid-template-columns: 1fr;
   }
-  .search-wrap {
-    grid-column: 1 / -1;
+  .toolbar {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .filters-btn {
+    display: inline-flex;
   }
 }
 </style>

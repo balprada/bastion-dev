@@ -1,19 +1,18 @@
 <script setup lang="ts">
-import type { Finding } from '~/types'
+import type { ScopedFinding } from '~/types'
 
 const props = defineProps<{
-  findings: Finding[]
+  findings: ScopedFinding[]
   loading?: boolean
   hasAny?: boolean
 }>()
 
 const emit = defineEmits<{
-  select: [finding: Finding]
+  select: [finding: ScopedFinding]
   clear: []
 }>()
 
 const SKELETON_ROWS = 8
-// Deterministic width variety so skeleton rows don't look copy-pasted.
 const TITLE_WIDTHS = ['72%', '55%', '84%']
 </script>
 
@@ -32,8 +31,8 @@ const TITLE_WIDTHS = ['72%', '55%', '84%']
         <div class="cell c-cvss">
           <span class="skeleton" style="width: 30px; height: 14px" />
         </div>
-        <div class="cell c-status">
-          <span class="skeleton" style="width: 92px; height: 20px; border-radius: 999px" />
+        <div class="cell c-effort">
+          <span class="skeleton" style="width: 58px; height: 18px; border-radius: 6px" />
         </div>
         <div class="cell c-date">
           <span class="skeleton" style="width: 74px; height: 12px" />
@@ -42,27 +41,29 @@ const TITLE_WIDTHS = ['72%', '55%', '84%']
     </div>
 
     <template v-else>
-      <!-- Empty states: distinguish "no results from filters" vs "org has nothing" -->
+      <!-- Empty states: filtered-empty vs nothing-at-all -->
       <div v-if="findings.length === 0" class="empty">
         <template v-if="hasAny">
           <p class="empty-title">No findings match the current filters</p>
-          <button class="btn btn-sm" type="button" @click="emit('clear')">Clear filters</button>
+          <button class="btn btn-sm" type="button" @click="emit('clear')">
+            Clear filters
+          </button>
         </template>
         <template v-else>
-          <p class="empty-title">No findings recorded yet</p>
+          <p class="empty-title">No findings recorded for this organization</p>
           <p class="empty-sub">
-            New scan results for this organization will appear here.
+            A clean report — or the next scan hasn't run yet. New findings
+            appear here as audits complete.
           </p>
         </template>
       </div>
 
       <template v-else>
-        <!-- Header (desktop only — rows become cards on mobile) -->
         <div class="row thead" aria-hidden="true">
           <div class="cell c-sev">Severity</div>
           <div class="cell c-title">Finding</div>
           <div class="cell c-cvss">CVSS</div>
-          <div class="cell c-status">Status</div>
+          <div class="cell c-effort">Effort</div>
           <div class="cell c-date">Detected</div>
         </div>
 
@@ -82,13 +83,15 @@ const TITLE_WIDTHS = ['72%', '55%', '84%']
             </div>
             <div class="cell c-title">
               <p class="title">{{ f.title }}</p>
-              <p class="asset mono">{{ f.asset }}</p>
+              <p class="asset mono">
+                {{ f.asset }}<template v-if="f.affected_component"> · {{ f.affected_component }}</template>
+              </p>
             </div>
             <div class="cell c-cvss mono" :class="f.severity">
               {{ f.cvss.toFixed(1) }}
             </div>
-            <div class="cell c-status">
-              <StatusPill :status="f.status" />
+            <div class="cell c-effort">
+              <EffortChip :effort="f.rootCause.fix_available ? f.rootCause.fix_effort : null" />
             </div>
             <div class="cell c-date mono">{{ formatDate(f.detected_at) }}</div>
           </div>
@@ -100,13 +103,13 @@ const TITLE_WIDTHS = ['72%', '55%', '84%']
 
 <style scoped>
 .table {
-  overflow: hidden; /* clip row hover at the rounded corners */
+  overflow: hidden;
 }
 
 .row {
   display: grid;
-  grid-template-columns: 6.4rem minmax(0, 1fr) 3.4rem 7.4rem 6rem;
-  grid-template-areas: 'sev title cvss status date';
+  grid-template-columns: 6.4rem minmax(0, 1fr) 3.2rem 6.8rem 5.5rem;
+  grid-template-areas: 'sev title cvss effort date';
   gap: 1rem;
   align-items: center;
   padding: 0.85rem 1.25rem;
@@ -139,7 +142,7 @@ const TITLE_WIDTHS = ['72%', '55%', '84%']
 .c-sev    { grid-area: sev; }
 .c-title  { grid-area: title; }
 .c-cvss   { grid-area: cvss; text-align: right; font-weight: 500; color: var(--c); }
-.c-status { grid-area: status; }
+.c-effort { grid-area: effort; }
 .c-date   { grid-area: date; text-align: right; color: var(--text-muted); font-size: var(--text-xs); }
 
 .title {
@@ -159,13 +162,11 @@ const TITLE_WIDTHS = ['72%', '55%', '84%']
   white-space: nowrap;
 }
 
-/* CVSS score colored by its severity — functional color, same palette. */
 .c-cvss.critical { --c: var(--sev-critical); }
 .c-cvss.high     { --c: var(--sev-high); }
 .c-cvss.medium   { --c: var(--sev-medium); }
 .c-cvss.low      { --c: var(--sev-low); }
 
-/* Empty states */
 .empty {
   padding: 3rem 1.5rem;
   display: grid;
@@ -185,20 +186,20 @@ const TITLE_WIDTHS = ['72%', '55%', '84%']
   max-width: 26rem;
 }
 
-/* Mobile: rows become cards. Header hidden — each card labels itself. */
+/* Mobile: rows become cards, header hidden — each card labels itself. */
 @media (max-width: 720px) {
   .row {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
-      'sev   date'
-      'title title'
-      'cvss  status';
+      'sev    date'
+      'title  title'
+      'cvss   effort';
     gap: 0.5rem 0.75rem;
     padding: 0.9rem 1rem;
   }
   .thead { display: none; }
   .c-cvss { text-align: left; font-size: var(--text-base); }
-  .c-status { justify-self: end; }
+  .c-effort { justify-self: end; }
   .c-date { color: var(--text-faint); }
 }
 </style>
