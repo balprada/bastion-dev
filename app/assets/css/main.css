@@ -195,3 +195,9 @@ a { color: var(--accent); }
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---- text size control (Step 14) --------------------------------------
+   The A−/A/A+ topbar control scales the root font; every token is rem-
+   based so the whole system moves together. m = default, no attribute. */
+html[data-size='s'] { font-size: 93.75%; }  /* 15px */
+html[data-size='l'] { font-size: 112.5%; }  /* 18px */

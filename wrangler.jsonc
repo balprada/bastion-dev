@@ -1,22 +1,15 @@
-// wrangler.jsonc — Cloudflare Workers static-assets configuration.
-// No `main` script: this project serves only the static bundle produced by
-// `npm run generate` (.output/public). The dashboard's deploy command
-// (`npx wrangler deploy`) reads this file.
+// wrangler.jsonc — demo2 branch. Deploy target for the bastion-v2 Workers
+// project (production branch: demo2). v1's copy on main keeps the name
+// bastion-dev — branches are independent.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
 
-  // Must match the project name in the Cloudflare form EXACTLY —
-  // a mismatch makes the deploy fail its authorization check.
-  "name": "bastion-dev",
+  "name": "bastion-v2",
 
   "compatibility_date": "2025-07-15",
 
   "assets": {
-    // What `npm run generate` produces.
     "directory": "./.output/public",
-    // SPA fallback: unknown paths serve index.html with HTTP 200.
-    // Same job _redirects does on Pages — that file now sits inert in
-    // the bundle, which is fine.
     "not_found_handling": "single-page-application"
   }
 }

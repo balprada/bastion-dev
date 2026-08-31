@@ -1,8 +1,8 @@
 <script setup lang="ts">
-// App shell: sticky topbar, content slot, slim footer.
-// init() is idempotent — the auth middleware (Step 4) awaits the same
-// promise, so this just guarantees the topbar reacts on every route.
+// App shell: sticky topbar, content slot, slim footer. init() is
+// idempotent — the auth middleware awaits the same promise.
 const { user, org, ready, init, signOut } = useSession()
+const { size, set } = useTextSize()
 const signingOut = ref(false)
 
 onMounted(() => {
@@ -31,16 +31,46 @@ async function handleSignOut() {
             <path d="M16 17v3.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
           </svg>
           <span class="brand-name">Bastion</span>
-          <!-- <span class="brand-tag mono">findings console</span> -->
-          <span class="brand-tag mono">Audit Portal</span>
+          <span class="brand-tag mono">audit portal</span>
         </NuxtLink>
 
         <nav class="nav" aria-label="Primary">
           <NuxtLink to="/" class="nav-link">Findings</NuxtLink>
+          <NuxtLink to="/attack" class="nav-link">Attack Lab</NuxtLink>
           <NuxtLink to="/about" class="nav-link">About</NuxtLink>
         </nav>
 
         <div class="session">
+          <div class="size-ctrl" role="group" aria-label="Text size">
+            <button
+              type="button"
+              class="size-btn mono"
+              :class="{ active: size === 's' }"
+              aria-label="Smaller text"
+              @click="set('s')"
+            >
+              A−
+            </button>
+            <button
+              type="button"
+              class="size-btn mono"
+              :class="{ active: size === 'm' }"
+              aria-label="Default text size"
+              @click="set('m')"
+            >
+              A
+            </button>
+            <button
+              type="button"
+              class="size-btn mono"
+              :class="{ active: size === 'l' }"
+              aria-label="Larger text"
+              @click="set('l')"
+            >
+              A+
+            </button>
+          </div>
+
           <template v-if="ready">
             <template v-if="user">
               <span v-if="org" class="org-chip" :title="`Organization: ${org.name}`">
@@ -80,7 +110,7 @@ async function handleSignOut() {
   flex-direction: column;
 }
 
-/* z-index 40 — the detail drawer (Step 5) layers above at 100. */
+/* z-index 40 — the detail drawer layers above at 100. */
 .topbar {
   position: sticky;
   top: 0;
@@ -150,6 +180,32 @@ async function handleSignOut() {
   min-width: 0;
 }
 
+/* Text size control — always available on any page with the topbar. */
+.size-ctrl {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.size-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  font-size: var(--text-2xs);
+  padding: 0.28rem 0.5rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.size-btn + .size-btn {
+  border-left: 1px solid var(--border-strong);
+}
+.size-btn:hover { color: var(--text); }
+.size-btn.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
 .org-chip {
   display: inline-flex;
   align-items: center;
@@ -212,6 +268,7 @@ async function handleSignOut() {
   .topbar-inner { padding: 0 1rem; gap: 1rem; }
   .brand-tag { display: none; }
   .user-email { display: none; }
+  .nav-link { padding: 0 0.5rem; font-size: 0.72rem; }
   .content { padding: 1.25rem 1rem 2rem; }
   .footer { padding: 0.8rem 1rem; }
 }
