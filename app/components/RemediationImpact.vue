@@ -78,7 +78,7 @@ const lowHanging = computed(() => {
     aria-label="Remediation impact"
   >
     <header class="head">
-      <p class="mark mono">// remediation impact</p>
+      <p class="mark mono">Remediation impact</p>
       <h2>What one change buys you</h2>
     </header>
 
